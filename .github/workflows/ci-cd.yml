@@ -38,7 +38,7 @@ jobs:
         run: npm test
 
   publish:
-    name: Publish Packages
+    name: Publish to NPM Registry
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -49,31 +49,17 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # --- 1. PUBLISH TO GITHUB PACKAGES ---
-      - name: Setup Node for GitHub Packages
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-          registry-url: 'https://npm.pkg.github.com/'
-
-      - name: Install Dependencies
-        run: npm install
-
-      - name: Publish to GitHub Packages
-        run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
-
-      # --- 2. PUBLISH TO NPM REGISTRY ---
       - name: Setup Node for NPM Registry
         uses: actions/setup-node@v4
         with:
           node-version: '18'
           registry-url: 'https://registry.npmjs.org/'
 
+      - name: Install Dependencies
+        run: npm install
+
       - name: Publish to NPM Registry
-        run: npm publish --access public
+        run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         continue-on-error: true
