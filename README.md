@@ -17,6 +17,7 @@ Follow these steps to seamlessly integrate `express-bg-remover` into your existi
 ### Step 1: Install Dependencies
 Install the package along with `multer` (required for parsing `multipart/form-data`).
 
+
 ```bash
 npm install express-bg-remover multer
 ```
