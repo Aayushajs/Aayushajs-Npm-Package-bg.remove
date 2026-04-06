@@ -8,6 +8,9 @@ on:
     branches:
       - main
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   test:
     name: Run Tests
@@ -23,11 +26,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '18'
-          cache: 'npm'
-          cache-dependency-path: ./express-bg-remover/package-lock.json
 
       - name: Install Dependencies
-        # npm install is used instead of npm ci just in case package-lock.json is missing or out of sync
         run: npm install
 
       - name: Run Tests
