@@ -1,0 +1,7 @@
+__tests__/
+node_modules/
+.npmignore
+.env
+.github/
+jest.config.js
+coverage/
