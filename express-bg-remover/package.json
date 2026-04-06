@@ -1,13 +1,10 @@
 {
-  "name": "@aayushajs/express-bg-remover",
+  "name": "bg-remover",
   "version": "1.0.0",
   "description": "Lightweight Express middleware for background removal using external APIs",
   "repository": {
     "type": "git",
     "url": "https://github.com/Aayushajs/Aayushajs-Npm-Package-bg.remove.git"
-  },
-  "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
   },
   "main": "src/index.js",
   "exports": {
