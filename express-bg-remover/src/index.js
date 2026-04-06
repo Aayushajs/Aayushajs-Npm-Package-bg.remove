@@ -13,16 +13,12 @@ const FormData = require('form-data');
  */
 function removeBgMiddleware(options = {}) {
     const {
-        apiUrl,
+        apiUrl = 'https://DevelopmentT-background-remover.hf.space/remove-bg',
         timeout = 10000,
         retries = 2,
         replaceOriginal = false,
         fieldName = 'file'
     } = options;
-
-    if (!apiUrl) {
-        throw new Error('removeBgMiddleware requires an apiUrl option');
-    }
 
     return async function(req, res, next) {
         try {

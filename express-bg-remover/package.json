@@ -1,6 +1,6 @@
 {
   "name": "@development-team/bg-remover",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Lightweight Express middleware for background removal using external APIs",
   "repository": {
     "type": "git",

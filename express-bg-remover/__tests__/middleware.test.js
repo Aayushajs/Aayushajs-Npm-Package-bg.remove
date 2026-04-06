@@ -53,8 +53,9 @@ describe('removeBgMiddleware', () => {
         nock.cleanAll();
     });
 
-    test('should throw error if apiUrl is not provided', () => {
-        expect(() => removeBgMiddleware({})).toThrow('requires an apiUrl option');
+    test('should use default apiUrl if not provided', () => {
+        const middleware = removeBgMiddleware({});
+        expect(typeof middleware).toBe('function');
     });
 
     test('should skip if no file is provided', async () => {
