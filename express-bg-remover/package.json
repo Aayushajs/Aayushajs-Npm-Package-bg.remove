@@ -1,7 +1,7 @@
 {
   "name": "@development-team/bg-remover",
-  "version": "1.0.1",
-  "description": "Lightweight Express middleware for background removal using external APIs",
+  "version": "1.1.0",
+  "description": "Express middleware for background removal and OCR text extraction with real-time WebSocket streaming",
   "repository": {
     "type": "git",
     "url": "https://github.com/Aayushajs/Aayushajs-Npm-Package-bg.remove.git"
@@ -20,13 +20,17 @@
     "node": ">=14.0.0"
   },
   "scripts": {
-    "test": "jest",
-    "test:coverage": "jest --coverage"
+    "test": "jest --forceExit",
+    "test:coverage": "jest --coverage --forceExit"
   },
   "keywords": [
     "express",
     "middleware",
     "background-removal",
+    "ocr",
+    "text-extraction",
+    "websocket",
+    "sse",
     "image",
     "multer",
     "huggingface"
@@ -35,7 +39,8 @@
   "license": "MIT",
   "dependencies": {
     "axios": "^1.6.0",
-    "form-data": "^4.0.0"
+    "form-data": "^4.0.0",
+    "ws": "^8.16.0"
   },
   "devDependencies": {
     "express": "^4.18.2",
