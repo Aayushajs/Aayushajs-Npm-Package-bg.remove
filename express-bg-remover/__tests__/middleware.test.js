@@ -3,36 +3,31 @@ const express = require('express');
 const multer = require('multer');
 const nock = require('nock');
 const { EventEmitter } = require('events');
-const { removeBgMiddleware, ocrMiddleware, ocrStreamHandler } = require('../src/index');
+const { removeBgMiddleware, ocrMiddleware, ocrRestMiddleware, ocrStreamHandler } = require('../src/index');
 
-// ---------------------------------------------------------------------------
-// WebSocket mock — must be declared before any require('../src/index') resolves
-// ---------------------------------------------------------------------------
-jest.mock('ws', () => {
-    const { EventEmitter } = require('events');
-
-    class MockWebSocket extends EventEmitter {
-        constructor(url) {
-            super();
-            this.url = url;
-            this.send = jest.fn();
-            this.close = jest.fn();
-            this.terminate = jest.fn();
-            MockWebSocket.__instances.push(this);
-        }
-    }
-    MockWebSocket.__instances = [];
-
-    return MockWebSocket;
-});
-
-const WebSocket = require('ws');
-
-// Flush the microtask/Promise queue so async middleware can resume
 const flushPromises = () => new Promise((resolve) => setImmediate(resolve));
 
+const OCR_BASE = 'http://ocr.test';
+
+// Fake OCR REST response (what /api/ocr returns)
+const fakeOcrBody = {
+    status: 'success',
+    total_lines: 2,
+    lines: [
+        { index: 1, text: 'Hello', confidence: 0.99, bbox: [] },
+        { index: 2, text: 'World', confidence: 0.95, bbox: [] }
+    ]
+};
+
+// Fake SSE stream body (what /api/ocr/stream returns)
+const fakeOcrSse =
+    'data: {"event":"status","data":{"message":"received","stage":"received"}}\n\n' +
+    'data: {"event":"ocr_chunk","data":"Hello","index":1,"confidence":0.99,"bbox":[]}\n\n' +
+    'data: {"event":"ocr_chunk","data":"World","index":2,"confidence":0.95,"bbox":[]}\n\n' +
+    'data: {"event":"ocr_complete","data":{"message":"done","total_lines":2}}\n\n';
+
 // ---------------------------------------------------------------------------
-// removeBgMiddleware tests (unchanged)
+// removeBgMiddleware tests (unchanged behaviour)
 // ---------------------------------------------------------------------------
 describe('removeBgMiddleware', () => {
     let app;
@@ -47,17 +42,13 @@ describe('removeBgMiddleware', () => {
             upload.single('image'),
             removeBgMiddleware({ apiUrl, retries: 1 }),
             (req, res) => {
-                if (req.bgError) {
-                    res.status(500).json({ error: req.bgError.message });
-                } else if (req.processedImage) {
-                    res.status(200).json({
-                        hasProcessed: true,
-                        mimetype: req.processedImage.mimetype,
-                        bufferLength: req.processedImage.buffer.length
-                    });
-                } else {
-                    res.status(200).json({ hasProcessed: false });
-                }
+                if (req.bgError) return res.status(500).json({ error: req.bgError.message });
+                if (req.processedImage) return res.status(200).json({
+                    hasProcessed: true,
+                    mimetype: req.processedImage.mimetype,
+                    bufferLength: req.processedImage.buffer.length
+                });
+                res.status(200).json({ hasProcessed: false });
             }
         );
 
@@ -66,9 +57,7 @@ describe('removeBgMiddleware', () => {
             upload.single('image'),
             removeBgMiddleware({ apiUrl, replaceOriginal: true }),
             (req, res) => {
-                if (req.bgError) {
-                    return res.status(500).json({ error: req.bgError.message });
-                }
+                if (req.bgError) return res.status(500).json({ error: req.bgError.message });
                 res.status(200).json({
                     fileSize: req.file.size,
                     fileMimeType: req.file.mimetype,
@@ -79,369 +68,293 @@ describe('removeBgMiddleware', () => {
         );
     });
 
-    afterEach(() => {
-        nock.cleanAll();
-    });
+    afterEach(() => nock.cleanAll());
 
-    test('should use default apiUrl if not provided', () => {
-        const middleware = removeBgMiddleware({});
-        expect(typeof middleware).toBe('function');
+    test('should return a middleware function', () => {
+        expect(typeof removeBgMiddleware()).toBe('function');
     });
 
     test('should skip if no file is provided', async () => {
-        const response = await request(app).post('/upload');
-        expect(response.status).toBe(200);
-        expect(response.body.hasProcessed).toBe(false);
+        const res = await request(app).post('/upload');
+        expect(res.status).toBe(200);
+        expect(res.body.hasProcessed).toBe(false);
     });
 
     test('should skip if file mimetype is not image/', async () => {
-        const response = await request(app)
-            .post('/upload')
-            .attach('image', Buffer.from('hello text'), {
-                filename: 'text.txt',
-                contentType: 'text/plain'
-            });
-        expect(response.status).toBe(200);
-        expect(response.body.hasProcessed).toBe(false);
+        const res = await request(app).post('/upload')
+            .attach('image', Buffer.from('hello text'), { filename: 'text.txt', contentType: 'text/plain' });
+        expect(res.status).toBe(200);
+        expect(res.body.hasProcessed).toBe(false);
     });
 
     test('should process image and attach to req.processedImage', async () => {
-        const fakeImage = Buffer.from('fake image data');
         const fakeProcessed = Buffer.from('processed fake image');
+        nock('http://api.test').post('/remove-bg').reply(200, fakeProcessed, { 'Content-Type': 'image/png' });
 
-        nock('http://api.test')
-            .post('/remove-bg')
-            .reply(200, fakeProcessed, { 'Content-Type': 'image/png' });
+        const res = await request(app).post('/upload')
+            .attach('image', Buffer.from('fake image'), { filename: 'test.jpg', contentType: 'image/jpeg' });
 
-        const response = await request(app)
-            .post('/upload')
-            .attach('image', fakeImage, {
-                filename: 'test.jpg',
-                contentType: 'image/jpeg'
-            });
-
-        expect(response.status).toBe(200);
-        expect(response.body.hasProcessed).toBe(true);
-        expect(response.body.mimetype).toBe('image/png');
-        expect(response.body.bufferLength).toBe(fakeProcessed.length);
+        expect(res.status).toBe(200);
+        expect(res.body.hasProcessed).toBe(true);
+        expect(res.body.mimetype).toBe('image/png');
+        expect(res.body.bufferLength).toBe(fakeProcessed.length);
     });
 
     test('should handle API failure, retry, and set req.bgError', async () => {
-        const fakeImage = Buffer.from('fake image data');
+        nock('http://api.test').post('/remove-bg').reply(500, 'Error').post('/remove-bg').reply(500, 'Error');
 
-        nock('http://api.test')
-            .post('/remove-bg')
-            .reply(500, 'Internal Error')
-            .post('/remove-bg')
-            .reply(500, 'Internal Error');
+        const res = await request(app).post('/upload')
+            .attach('image', Buffer.from('fake image'), { filename: 'test.jpg', contentType: 'image/jpeg' });
 
-        const response = await request(app)
-            .post('/upload')
-            .attach('image', fakeImage, {
-                filename: 'test.jpg',
-                contentType: 'image/jpeg'
-            });
-
-        expect(response.status).toBe(500);
-        expect(response.body.error).toContain('Background removal API failed');
+        expect(res.status).toBe(500);
+        expect(res.body.error).toContain('Background removal API failed');
     });
 
     test('should replace original file if replaceOriginal is true', async () => {
-        const fakeImage = Buffer.from('fake image data');
         const fakeProcessed = Buffer.from('processed!');
+        nock('http://api.test').post('/remove-bg').reply(200, fakeProcessed, { 'Content-Type': 'image/png' });
 
-        nock('http://api.test')
-            .post('/remove-bg')
-            .reply(200, fakeProcessed, { 'Content-Type': 'image/png' });
+        const res = await request(app).post('/upload-replace')
+            .attach('image', Buffer.from('fake image'), { filename: 'test.jpg', contentType: 'image/jpeg' });
 
-        const response = await request(app)
-            .post('/upload-replace')
-            .attach('image', fakeImage, {
-                filename: 'test.jpg',
-                contentType: 'image/jpeg'
-            });
-
-        expect(response.status).toBe(200);
-        expect(response.body.fileSize).toBe(fakeProcessed.length);
-        expect(response.body.fileMimeType).toBe('image/png');
-        expect(response.body.originalName).toBe('test.png');
+        expect(res.status).toBe(200);
+        expect(res.body.fileSize).toBe(fakeProcessed.length);
+        expect(res.body.fileMimeType).toBe('image/png');
+        expect(res.body.originalName).toBe('test.png');
     });
 });
 
 // ---------------------------------------------------------------------------
-// ocrMiddleware tests
+// ocrMiddleware tests — HTTP multipart to /api/ocr
 // ---------------------------------------------------------------------------
 describe('ocrMiddleware', () => {
+    let app;
+
     beforeEach(() => {
-        WebSocket.__instances = [];
+        app = express();
+        const upload = multer({ storage: multer.memoryStorage() });
+
+        app.post(
+            '/ocr',
+            upload.single('image'),
+            ocrMiddleware({ apiUrl: OCR_BASE, retries: 1 }),
+            (req, res) => {
+                if (req.ocrError) return res.status(500).json({ error: req.ocrError.message });
+                res.status(200).json(req.ocrResult);
+            }
+        );
     });
 
-    const makeReq = (override = {}) => ({
-        file: {
-            buffer: Buffer.from('fake-image'),
-            mimetype: 'image/jpeg',
-            originalname: 'test.jpg'
-        },
-        ...override
-    });
+    afterEach(() => nock.cleanAll());
 
     test('should return a middleware function', () => {
         expect(typeof ocrMiddleware()).toBe('function');
     });
 
-    test('should skip and call next if no file is provided', async () => {
-        const middleware = ocrMiddleware({ wsUrl: 'ws://test.local' });
+    test('ocrRestMiddleware is an alias of ocrMiddleware', () => {
+        expect(ocrRestMiddleware).toBe(ocrMiddleware);
+    });
+
+    test('should skip and call next if no file provided', async () => {
+        const middleware = ocrMiddleware({ apiUrl: OCR_BASE });
         const next = jest.fn();
         await middleware({}, {}, next);
         expect(next).toHaveBeenCalledTimes(1);
-        expect(WebSocket.__instances.length).toBe(0);
     });
 
     test('should skip and call next if mimetype is not image/', async () => {
-        const middleware = ocrMiddleware({ wsUrl: 'ws://test.local' });
+        const middleware = ocrMiddleware({ apiUrl: OCR_BASE });
         const next = jest.fn();
-        const req = { file: { buffer: Buffer.from('data'), mimetype: 'text/plain' } };
+        await middleware({ file: { buffer: Buffer.from('x'), mimetype: 'text/plain' } }, {}, next);
+        expect(next).toHaveBeenCalledTimes(1);
+    });
+
+    test('should convert wsUrl (ws://) to http:// automatically', async () => {
+        nock(OCR_BASE).post('/api/ocr').reply(200, fakeOcrBody);
+        const middleware = ocrMiddleware({ wsUrl: 'ws://ocr.test', retries: 0 });
+        const req = { file: { buffer: Buffer.from('img'), mimetype: 'image/jpeg', originalname: 'a.jpg' } };
+        const next = jest.fn();
         await middleware(req, {}, next);
         expect(next).toHaveBeenCalledTimes(1);
-        expect(WebSocket.__instances.length).toBe(0);
+        expect(req.ocrResult).toBeDefined();
+    });
+
+    test('should convert wsUrl (wss://) to https:// automatically', async () => {
+        nock('https://ocr.test').post('/api/ocr').reply(200, fakeOcrBody);
+        const middleware = ocrMiddleware({ wsUrl: 'wss://ocr.test', retries: 0 });
+        const req = { file: { buffer: Buffer.from('img'), mimetype: 'image/jpeg', originalname: 'a.jpg' } };
+        const next = jest.fn();
+        await middleware(req, {}, next);
+        expect(next).toHaveBeenCalledTimes(1);
+        expect(req.ocrResult).toBeDefined();
     });
 
     test('should attach req.ocrResult and req.ocrChunks on success', async () => {
-        const middleware = ocrMiddleware({ wsUrl: 'ws://test.local', timeout: 5000 });
-        const req = makeReq();
-        const next = jest.fn();
+        nock(OCR_BASE).post('/api/ocr').reply(200, fakeOcrBody);
 
-        const p = middleware(req, {}, next);
+        const res = await request(app).post('/ocr')
+            .attach('image', Buffer.from('fake-image'), { filename: 'test.jpg', contentType: 'image/jpeg' });
 
-        const ws = WebSocket.__instances[0];
-        ws.emit('open');
-        ws.emit('message', Buffer.from(JSON.stringify({ event: 'ocr_chunk', text: 'Hello', confidence: 0.99 })));
-        ws.emit('message', Buffer.from(JSON.stringify({ event: 'ocr_chunk', text: 'World', confidence: 0.95 })));
-        ws.emit('message', Buffer.from(JSON.stringify({ event: 'ocr_complete', full_text: 'Hello\nWorld' })));
-
-        await p;
-
-        expect(next).toHaveBeenCalledTimes(1);
-        expect(req.ocrResult).toBeDefined();
-        expect(req.ocrResult.full_text).toBe('Hello\nWorld');
-        expect(req.ocrResult.total_lines).toBe(2);
-        expect(req.ocrChunks).toHaveLength(2);
-        expect(req.ocrChunks[0]).toEqual({ text: 'Hello', confidence: 0.99 });
-        expect(req.ocrError).toBeUndefined();
+        expect(res.status).toBe(200);
+        expect(res.body.full_text).toBe('Hello\nWorld');
+        expect(res.body.total_lines).toBe(2);
+        expect(res.body.lines).toHaveLength(2);
+        expect(res.body.lines[0]).toEqual({ text: 'Hello', confidence: 0.99 });
     });
 
-    test('should send the image buffer as binary over WebSocket', async () => {
-        const middleware = ocrMiddleware({ wsUrl: 'ws://test.local', timeout: 5000 });
-        const req = makeReq();
+    test('should set req.ocrError when API returns an error and call next', async () => {
+        nock(OCR_BASE).post('/api/ocr').reply(500, 'Server error').post('/api/ocr').reply(500, 'Server error');
 
-        const p = middleware(req, {}, jest.fn());
-        const ws = WebSocket.__instances[0];
-        ws.emit('open');
-        ws.emit('message', Buffer.from(JSON.stringify({ event: 'ocr_complete', full_text: 'text' })));
-        await p;
+        const res = await request(app).post('/ocr')
+            .attach('image', Buffer.from('fake-image'), { filename: 'test.jpg', contentType: 'image/jpeg' });
 
-        expect(ws.send).toHaveBeenCalledWith(req.file.buffer);
+        expect(res.status).toBe(500);
+        expect(res.body.error).toContain('OCR failed after 2 attempt(s)');
     });
 
-    test('should set req.ocrError when WS emits an error event and call next', async () => {
-        const middleware = ocrMiddleware({ wsUrl: 'ws://test.local', retries: 0, timeout: 5000 });
-        const req = makeReq();
-        const next = jest.fn();
+    test('should retry on failure and succeed on second attempt', async () => {
+        nock(OCR_BASE).post('/api/ocr').reply(500, 'Error').post('/api/ocr').reply(200, fakeOcrBody);
 
-        const p = middleware(req, {}, next);
-        WebSocket.__instances[0].emit('error', new Error('Connection refused'));
-        await p;
+        const res = await request(app).post('/ocr')
+            .attach('image', Buffer.from('fake-image'), { filename: 'test.jpg', contentType: 'image/jpeg' });
 
-        expect(next).toHaveBeenCalledTimes(1);
-        expect(req.ocrError).toBeDefined();
-        expect(req.ocrError.message).toContain('OCR failed after 1 attempt(s)');
-        expect(req.ocrError.message).toContain('Connection refused');
-        expect(req.ocrResult).toBeUndefined();
-    });
-
-    test('should set req.ocrError when server sends an error event', async () => {
-        const middleware = ocrMiddleware({ wsUrl: 'ws://test.local', retries: 0, timeout: 5000 });
-        const req = makeReq();
-        const next = jest.fn();
-
-        const p = middleware(req, {}, next);
-        const ws = WebSocket.__instances[0];
-        ws.emit('open');
-        ws.emit('message', Buffer.from(JSON.stringify({ event: 'error', message: 'Invalid image format' })));
-        await p;
-
-        expect(next).toHaveBeenCalledTimes(1);
-        expect(req.ocrError).toBeDefined();
-        expect(req.ocrError.message).toContain('Invalid image format');
-    });
-
-    test('should retry on failure and set req.ocrError after all retries fail', async () => {
-        const middleware = ocrMiddleware({ wsUrl: 'ws://test.local', retries: 1, timeout: 5000 });
-        const req = makeReq();
-        const next = jest.fn();
-
-        const p = middleware(req, {}, next);
-
-        // First attempt fails
-        expect(WebSocket.__instances.length).toBe(1);
-        WebSocket.__instances[0].emit('error', new Error('Connection refused'));
-
-        // Allow microtasks to run so retry loop can create the second WS instance
-        await flushPromises();
-
-        // Second attempt (retry) fails
-        expect(WebSocket.__instances.length).toBe(2);
-        WebSocket.__instances[1].emit('error', new Error('Connection refused'));
-
-        await p;
-
-        expect(next).toHaveBeenCalledTimes(1);
-        expect(req.ocrError).toBeDefined();
-        expect(req.ocrError.message).toContain('OCR failed after 2 attempt(s)');
+        expect(res.status).toBe(200);
+        expect(res.body.total_lines).toBe(2);
     });
 });
 
 // ---------------------------------------------------------------------------
-// ocrStreamHandler tests
+// ocrStreamHandler tests — HTTP multipart to /api/ocr/stream, pipes SSE
+// supertest doesn't buffer text/event-stream body, so streaming-content tests
+// use manual req/res mocks (nock still intercepts the upstream axios call).
 // ---------------------------------------------------------------------------
 describe('ocrStreamHandler', () => {
-    beforeEach(() => {
-        WebSocket.__instances = [];
-    });
+    let app;
 
-    const makeReq = (override = {}) => {
+    // Manual mock helpers — mirror the old WebSocket test pattern
+    const makeManualReq = (override = {}) => {
         const req = new EventEmitter();
-        req.file = {
-            buffer: Buffer.from('fake-image'),
-            mimetype: 'image/jpeg',
-            originalname: 'test.jpg'
-        };
+        req.file = { buffer: Buffer.from('fake-image'), mimetype: 'image/jpeg', originalname: 'test.jpg' };
         return Object.assign(req, override);
     };
 
-    const makeRes = () => {
+    const makeManualRes = () => {
+        let resEnded = false;
         let resolveEnd;
-        const endPromise = new Promise((r) => { resolveEnd = r; });
+        const endPromise = new Promise(r => { resolveEnd = r; });
         const written = [];
-        const state = { writableEnded: false };
-        return Object.assign(state, {
+        const res = {
             setHeader: jest.fn(),
             flushHeaders: jest.fn(),
-            write: jest.fn().mockImplementation((data) => written.push(data)),
-            end: jest.fn().mockImplementation(() => {
-                state.writableEnded = true;
-                resolveEnd();
-            }),
+            write: jest.fn().mockImplementation(d => written.push(d.toString())),
+            end: jest.fn().mockImplementation(() => { resEnded = true; resolveEnd(); }),
             status: jest.fn().mockReturnThis(),
-            json: jest.fn(),
+            json: jest.fn().mockImplementation(() => { resolveEnd && resolveEnd(); }),
             written,
             endPromise
-        });
+        };
+        Object.defineProperty(res, 'writableEnded', { get: () => resEnded });
+        return res;
     };
+
+    beforeEach(() => {
+        app = express();
+        const upload = multer({ storage: multer.memoryStorage() });
+        app.post('/ocr/stream', upload.single('image'), ocrStreamHandler({ apiUrl: OCR_BASE, timeout: 5000 }));
+    });
+
+    afterEach(() => nock.cleanAll());
 
     test('should return a handler function', () => {
         expect(typeof ocrStreamHandler()).toBe('function');
     });
 
-    test('should return 400 JSON if no file is provided', () => {
-        const handler = ocrStreamHandler({ wsUrl: 'ws://test.local' });
-        const req = new EventEmitter();
-        const res = makeRes();
-        handler(req, res);
-        expect(res.status).toHaveBeenCalledWith(400);
-        expect(res.json).toHaveBeenCalledWith({ error: 'No image file provided' });
+    // supertest works fine for non-SSE responses (400 JSON errors)
+    test('should return 400 JSON if no file provided', async () => {
+        const res = await request(app).post('/ocr/stream');
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('No image file provided');
     });
 
-    test('should return 400 JSON if file is not an image', () => {
-        const handler = ocrStreamHandler({ wsUrl: 'ws://test.local' });
-        const req = new EventEmitter();
-        req.file = { buffer: Buffer.from('data'), mimetype: 'text/plain' };
-        const res = makeRes();
-        handler(req, res);
-        expect(res.status).toHaveBeenCalledWith(400);
-        expect(res.json).toHaveBeenCalledWith({ error: 'File must be an image' });
+    test('should return 400 JSON if file is not an image', async () => {
+        const res = await request(app).post('/ocr/stream')
+            .attach('image', Buffer.from('txt'), { filename: 'f.txt', contentType: 'text/plain' });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('File must be an image');
     });
 
-    test('should set SSE headers before streaming', () => {
-        const handler = ocrStreamHandler({ wsUrl: 'ws://test.local' });
-        const req = makeReq();
-        const res = makeRes();
-        handler(req, res);
-        expect(res.setHeader).toHaveBeenCalledWith('Content-Type', 'text/event-stream');
-        expect(res.setHeader).toHaveBeenCalledWith('Cache-Control', 'no-cache');
-        expect(res.setHeader).toHaveBeenCalledWith('Connection', 'keep-alive');
-        expect(res.flushHeaders).toHaveBeenCalled();
+    // SSE headers check — supertest captures headers even for SSE
+    test('should set SSE headers before streaming', async () => {
+        nock(OCR_BASE).post('/api/ocr/stream').reply(200, fakeOcrSse, { 'Content-Type': 'text/event-stream' });
+
+        const res = await request(app).post('/ocr/stream')
+            .attach('image', Buffer.from('fake-image'), { filename: 'test.jpg', contentType: 'image/jpeg' });
+
+        expect(res.headers['content-type']).toContain('text/event-stream');
+        expect(res.headers['cache-control']).toBe('no-cache');
     });
 
-    test('should stream all events as SSE and end after ocr_complete', async () => {
-        const handler = ocrStreamHandler({ wsUrl: 'ws://test.local', timeout: 5000 });
-        const req = makeReq();
-        const res = makeRes();
+    // Body content tests — use manual mock because supertest doesn't buffer SSE body
+    test('should stream all SSE events from the AI server to the client', async () => {
+        nock(OCR_BASE).post('/api/ocr/stream').reply(200, fakeOcrSse, { 'Content-Type': 'text/event-stream' });
+
+        const handler = ocrStreamHandler({ apiUrl: OCR_BASE, timeout: 5000 });
+        const req = makeManualReq();
+        const res = makeManualRes();
 
         handler(req, res);
-
-        const ws = WebSocket.__instances[0];
-        ws.emit('open');
-        ws.emit('message', Buffer.from(JSON.stringify({ event: 'status', message: 'Preprocessing...' })));
-        ws.emit('message', Buffer.from(JSON.stringify({ event: 'ocr_chunk', text: 'Hello', confidence: 0.99 })));
-        ws.emit('message', Buffer.from(JSON.stringify({ event: 'ocr_complete', full_text: 'Hello' })));
-
         await res.endPromise;
 
-        expect(res.written).toHaveLength(3);
-        expect(res.written[0]).toContain('"event":"status"');
-        expect(res.written[1]).toContain('"event":"ocr_chunk"');
-        expect(res.written[2]).toContain('"event":"ocr_complete"');
-        expect(res.end).toHaveBeenCalled();
+        const body = res.written.join('');
+        expect(body).toContain('"event":"status"');
+        expect(body).toContain('"event":"ocr_chunk"');
+        expect(body).toContain('"data":"Hello"');
+        expect(body).toContain('"data":"World"');
+        expect(body).toContain('"event":"ocr_complete"');
     });
 
-    test('should stream error event and end on server error message', async () => {
-        const handler = ocrStreamHandler({ wsUrl: 'ws://test.local', timeout: 5000 });
-        const req = makeReq();
-        const res = makeRes();
+    test('should write error SSE event when AI server returns non-200', async () => {
+        nock(OCR_BASE).post('/api/ocr/stream').reply(500, 'Internal Server Error');
+
+        const handler = ocrStreamHandler({ apiUrl: OCR_BASE, timeout: 5000 });
+        const req = makeManualReq();
+        const res = makeManualRes();
 
         handler(req, res);
-
-        const ws = WebSocket.__instances[0];
-        ws.emit('open');
-        ws.emit('message', Buffer.from(JSON.stringify({ event: 'error', message: 'Bad image' })));
-
         await res.endPromise;
 
-        expect(res.written[0]).toContain('"event":"error"');
-        expect(res.end).toHaveBeenCalled();
+        const body = res.written.join('');
+        expect(body).toContain('"event":"error"');
     });
 
-    test('should send error SSE and end on WS error event', async () => {
-        const handler = ocrStreamHandler({ wsUrl: 'ws://test.local', timeout: 5000 });
-        const req = makeReq();
-        const res = makeRes();
+    test('should handle wsUrl (backward compat) — wss:// converts to https://', async () => {
+        nock(OCR_BASE).post('/api/ocr/stream').reply(200, fakeOcrSse, { 'Content-Type': 'text/event-stream' });
+
+        const handler = ocrStreamHandler({ wsUrl: 'ws://ocr.test', timeout: 5000 });
+        const req = makeManualReq();
+        const res = makeManualRes();
 
         handler(req, res);
-
-        const ws = WebSocket.__instances[0];
-        ws.emit('error', new Error('Socket hang up'));
-
         await res.endPromise;
 
-        expect(res.written[0]).toContain('"event":"error"');
-        expect(res.written[0]).toContain('Socket hang up');
-        expect(res.end).toHaveBeenCalled();
+        const body = res.written.join('');
+        expect(body).toContain('"event":"ocr_complete"');
     });
 
-    test('should terminate WS when the HTTP client disconnects', async () => {
-        const handler = ocrStreamHandler({ wsUrl: 'ws://test.local', timeout: 5000 });
-        const req = makeReq();
-        const res = makeRes();
+    test('should not write error to response when client closes connection', async () => {
+        // Simulate client disconnect mid-stream by aborting on 'close'
+        nock(OCR_BASE).post('/api/ocr/stream').reply(200, fakeOcrSse, { 'Content-Type': 'text/event-stream' });
+
+        const handler = ocrStreamHandler({ apiUrl: OCR_BASE, timeout: 5000 });
+        const req = makeManualReq();
+        const res = makeManualRes();
 
         handler(req, res);
-
-        const ws = WebSocket.__instances[0];
-        ws.emit('open');
-
-        // Client closes connection before OCR completes
+        // Emit close immediately — simulates client disconnect before OCR completes
         req.emit('close');
 
-        expect(ws.terminate).toHaveBeenCalled();
+        await res.endPromise;
+        // After client disconnect, no error SSE should be written to the dead connection
+        expect(res.written.every(w => !w.includes('"event":"error"'))).toBe(true);
     });
 });

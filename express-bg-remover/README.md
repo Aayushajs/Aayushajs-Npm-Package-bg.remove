@@ -2,9 +2,11 @@
 
 [![NPM Version](https://img.shields.io/npm/v/@development-team/bg-remover)](https://www.npmjs.com/package/@development-team/bg-remover)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Node.js](https://img.shields.io/badge/node-%3E%3D14.0.0-brightgreen)](https://nodejs.org)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D16.0.0-brightgreen)](https://nodejs.org)
 
-A production-ready Express middleware suite for **AI-powered image background removal** and **real-time OCR text extraction** — built on top of industrial-grade AI APIs with WebSocket streaming support.
+A production-ready Express middleware suite for **AI-powered image background removal** and **real-time OCR text extraction**.
+
+> **v1.2.0** — Image is always sent as normal `multipart/form-data` (PNG/JPG). No WebSocket binary conversion required. Output available as a complete HTTP response or a real-time SSE stream.
 
 ---
 
@@ -12,12 +14,19 @@ A production-ready Express middleware suite for **AI-powered image background re
 
 | Feature | Description |
 |---|---|
-| Background Removal | Remove image backgrounds via a REST API call |
-| OCR — Buffered | Extract all text from an image, result attached to `req` |
-| OCR — Live Stream | Stream OCR results line-by-line to the client via SSE |
+| Background Removal | Remove image backgrounds via HTTP multipart upload |
+| OCR — Buffered | Upload image as PNG/JPG, get complete text result in `req.ocrResult` |
+| OCR — Live Stream | Upload image as PNG/JPG, receive OCR chunks in real-time via SSE |
 | Fail-Safe | Errors never crash your middleware chain — always calls `next()` |
-| Retry Logic | Configurable retry attempts for transient failures |
-| Zero-Config | Sensible defaults — most options are optional |
+| Retry Logic | Configurable retry attempts; smart — skips retry on 4xx errors |
+| Backward Compat | `wsUrl` still accepted — auto-converted to `https://` internally |
+
+---
+
+## Requirements
+
+- Node.js `>= 16.0.0`
+- `multer` (peer dependency for file uploads)
 
 ---
 
@@ -27,15 +36,13 @@ A production-ready Express middleware suite for **AI-powered image background re
 npm install @development-team/bg-remover multer
 ```
 
-> `multer` is required for handling `multipart/form-data` file uploads.
-
 ---
 
 ## Table of Contents
 
 1. [Background Removal](#1-background-removal)
-2. [OCR — Buffered Middleware](#2-ocr--buffered-middleware)
-3. [OCR — Live SSE Stream Handler](#3-ocr--live-sse-stream-handler)
+2. [OCR — Buffered (Complete Result)](#2-ocr--buffered-complete-result)
+3. [OCR — Live SSE Stream](#3-ocr--live-sse-stream)
 4. [Options Reference](#4-options-reference)
 5. [Request Object Properties](#5-request-object-properties)
 6. [Frontend Integration](#6-frontend-integration)
@@ -49,37 +56,28 @@ npm install @development-team/bg-remover multer
 
 **`removeBgMiddleware(options)`**
 
-Processes the uploaded image through an AI background removal API and attaches the result to `req.processedImage`. Always calls `next()` — even on failure.
+Uploads the image to a background removal REST API and attaches the result to `req.processedImage`. Always calls `next()` — even on failure.
 
 ### Basic Example
 
 ```javascript
 const express = require('express');
-const multer = require('multer');
+const multer  = require('multer');
 const { removeBgMiddleware } = require('@development-team/bg-remover');
 
-const app = express();
+const app    = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
 app.post(
     '/remove-background',
     upload.single('image'),
-    removeBgMiddleware({
-        timeout: 15000,   // optional: 15s timeout
-        retries: 2        // optional: retry twice on failure
-    }),
+    removeBgMiddleware({ timeout: 15000, retries: 2 }),
     (req, res) => {
         if (req.bgError) {
             return res.status(500).json({ error: req.bgError.message });
         }
-
-        if (!req.processedImage) {
-            return res.status(400).json({ error: 'No valid image provided' });
-        }
-
-        // req.processedImage.buffer  → Buffer of the transparent PNG
+        // req.processedImage.buffer  → Buffer (transparent PNG)
         // req.processedImage.mimetype → 'image/png'
-
         res.set('Content-Type', req.processedImage.mimetype);
         res.send(req.processedImage.buffer);
     }
@@ -88,8 +86,6 @@ app.post(
 
 ### Replace Original File In-Place
 
-Set `replaceOriginal: true` to overwrite `req.file` directly. Useful when you want downstream middleware to receive the processed image transparently.
-
 ```javascript
 app.post(
     '/upload',
@@ -97,13 +93,9 @@ app.post(
     removeBgMiddleware({ replaceOriginal: true }),
     (req, res) => {
         if (req.bgError) return res.status(500).json({ error: 'Processing failed' });
-
-        // req.file.buffer  → processed image
-        // req.file.mimetype → updated to 'image/png'
-        // req.file.size     → updated to new file size
-        // req.file filename → extension changed from .jpg to .png
-
-        res.json({ message: 'Uploaded', size: req.file.size });
+        // req.file.buffer   → processed image
+        // req.file.mimetype → 'image/png'
+        res.json({ size: req.file.size });
     }
 );
 ```
@@ -112,37 +104,37 @@ app.post(
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `apiUrl` | `string` | *(built-in)* | REST endpoint for background removal POST. |
-| `timeout` | `number` | `10000` | Request timeout in milliseconds. |
-| `retries` | `number` | `2` | Retry attempts after a failed request. |
-| `replaceOriginal` | `boolean` | `false` | If `true`, overwrites `req.file` with the processed image. |
-| `fieldName` | `string` | `"file"` | Form-data field name sent to the external API. |
+| `apiUrl` | `string` | *(built-in)* | Full URL of the background removal endpoint |
+| `timeout` | `number` | `10000` | Request timeout in ms |
+| `retries` | `number` | `2` | Retry attempts on failure |
+| `replaceOriginal` | `boolean` | `false` | Overwrite `req.file` with the processed result |
+| `fieldName` | `string` | `"file"` | Form-data field name sent to the API |
 
 ---
 
-## 2. OCR — Buffered Middleware
+## 2. OCR — Buffered (Complete Result)
 
 **`ocrMiddleware(options)`**
 
-Sends the uploaded image to an AI OCR server over **WebSocket**, waits for the full result, then attaches it to `req.ocrResult` and calls `next()`.
+Uploads the image as **normal `multipart/form-data`** (PNG/JPG) to `POST /api/ocr`, waits for the complete result, then attaches it to `req.ocrResult` and calls `next()`.
 
-Use this when you want a standard request/response flow and don't need real-time streaming to your HTTP client.
+Use this when you want a standard request/response flow and don't need real-time streaming.
 
 ### Basic Example
 
 ```javascript
 const express = require('express');
-const multer = require('multer');
+const multer  = require('multer');
 const { ocrMiddleware } = require('@development-team/bg-remover');
 
-const app = express();
+const app    = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
 app.post(
     '/ocr',
-    upload.single('image'),
+    upload.single('image'),       // accepts PNG, JPG, WEBP, etc.
     ocrMiddleware({
-        wsUrl: process.env.OCR_WS_URL, // your OCR server WebSocket base URL
+        apiUrl:  process.env.OCR_API_URL,  // e.g. "https://your-server.hf.space"
         timeout: 30000,
         retries: 1
     }),
@@ -150,24 +142,23 @@ app.post(
         if (req.ocrError) {
             return res.status(500).json({ error: req.ocrError.message });
         }
-
         res.json({
-            full_text:   req.ocrResult.full_text,    // full extracted text
-            total_lines: req.ocrResult.total_lines,   // number of lines detected
+            full_text:   req.ocrResult.full_text,    // complete extracted text
+            total_lines: req.ocrResult.total_lines,
             lines:       req.ocrResult.lines          // [{text, confidence}, ...]
         });
     }
 );
 ```
 
-### Response Object Shape
+### `req.ocrResult` Shape
 
 ```json
 {
   "full_text": "Paracetamol 500mg\nTake 2 times a day.",
   "total_lines": 2,
   "lines": [
-    { "text": "Paracetamol 500mg", "confidence": 0.985 },
+    { "text": "Paracetamol 500mg",   "confidence": 0.985 },
     { "text": "Take 2 times a day.", "confidence": 0.912 }
   ]
 }
@@ -177,36 +168,40 @@ app.post(
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `wsUrl` | `string` | `OCR_WS_URL` env var | WebSocket **base URL** of the OCR server (e.g. `wss://your-space.hf.space`). |
-| `timeout` | `number` | `30000` | Connection timeout in milliseconds. |
-| `retries` | `number` | `1` | Retry attempts on failure. |
+| `apiUrl` | `string` | `OCR_API_URL` env var | HTTP(S) base URL of the OCR server (e.g. `https://your-space.hf.space`) |
+| `wsUrl` | `string` | `OCR_WS_URL` env var | **Backward compat** — auto-converted to `https://` |
+| `timeout` | `number` | `30000` | Request timeout in ms |
+| `retries` | `number` | `1` | Retry attempts on failure (skipped on 4xx errors) |
+| `fieldName` | `string` | `"file"` | Form-data field name sent to the API |
+
+> **Note:** `ocrRestMiddleware` is an alias of `ocrMiddleware` — both are identical.
 
 ---
 
-## 3. OCR — Live SSE Stream Handler
+## 3. OCR — Live SSE Stream
 
 **`ocrStreamHandler(options)`**
 
-A complete **route handler** (not a middleware) that pipes OCR events from the WebSocket server directly to the HTTP client as **Server-Sent Events (SSE)** — giving users a real-time "live typing" experience as text is extracted line-by-line.
+Uploads the image as **normal `multipart/form-data`** (PNG/JPG) to `POST /api/ocr/stream` and pipes the OCR results back to the client as **Server-Sent Events** in real-time — line by line, as they are extracted.
 
-> This is a **route handler**, not middleware — it sends the HTTP response itself. Do not call `next()` after it.
+> This is a **route handler**, not a middleware — it sends the full HTTP response itself. Do **not** add another handler after it.
 
 ### Basic Example
 
 ```javascript
 const express = require('express');
-const multer = require('multer');
+const multer  = require('multer');
 const { ocrStreamHandler } = require('@development-team/bg-remover');
 
-const app = express();
+const app    = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
-// This single line is the entire route — no extra handler needed.
+// This single line is the complete route — no extra handler needed.
 app.post(
     '/ocr/stream',
-    upload.single('image'),
+    upload.single('image'),       // accepts PNG, JPG, WEBP, etc.
     ocrStreamHandler({
-        wsUrl: process.env.OCR_WS_URL,
+        apiUrl:  process.env.OCR_API_URL,
         timeout: 30000
     })
 );
@@ -214,33 +209,37 @@ app.post(
 
 ### SSE Event Stream Format
 
-The client receives a stream of `text/event-stream` events:
+The client receives a `text/event-stream` response with these events:
 
 ```
-data: {"event":"status","message":"Preprocessing image..."}
+data: {"event":"status","data":{"message":"📷 Image received","stage":"received"}}
 
-data: {"event":"status","message":"Extracting text..."}
+data: {"event":"status","data":{"message":"🔧 Processing image…","stage":"preprocessing"}}
 
-data: {"event":"ocr_chunk","text":"Paracetamol 500mg","confidence":0.985}
+data: {"event":"status","data":{"message":"📝 Reading text…","stage":"ocr_started"}}
 
-data: {"event":"ocr_chunk","text":"Take 2 times a day.","confidence":0.912}
+data: {"event":"ocr_chunk","data":"Paracetamol 500mg","index":1,"confidence":0.985,"bbox":[[...]]}
 
-data: {"event":"ocr_complete","full_text":"Paracetamol 500mg\nTake 2 times a day."}
+data: {"event":"ocr_chunk","data":"Take 2 times a day.","index":2,"confidence":0.912,"bbox":[[...]]}
+
+data: {"event":"ocr_complete","data":{"message":"✅ Done","total_lines":2}}
 ```
 
-| Event | Fields | Description |
+| Event | Key Fields | Description |
 |---|---|---|
-| `status` | `message` | Processing stage update |
-| `ocr_chunk` | `text`, `confidence` | One detected line of text, streamed live |
-| `ocr_complete` | `full_text` | Full extracted text — connection closes after this |
-| `error` | `message` | Error from the OCR server or timeout |
+| `status` | `data.message`, `data.stage` | Processing stage update |
+| `ocr_chunk` | `data` (text), `index`, `confidence`, `bbox` | One detected line, streamed live |
+| `ocr_complete` | `data.total_lines` | All lines sent — connection closes |
+| `error` | `message` | Error from OCR server or timeout |
 
 ### Options
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `wsUrl` | `string` | `OCR_WS_URL` env var | WebSocket **base URL** of the OCR server. |
-| `timeout` | `number` | `30000` | Connection timeout in milliseconds. |
+| `apiUrl` | `string` | `OCR_API_URL` env var | HTTP(S) base URL of the OCR server |
+| `wsUrl` | `string` | `OCR_WS_URL` env var | **Backward compat** — auto-converted to `https://` |
+| `timeout` | `number` | `30000` | Request timeout in ms |
+| `fieldName` | `string` | `"file"` | Form-data field name sent to the API |
 
 ---
 
@@ -250,25 +249,34 @@ data: {"event":"ocr_complete","full_text":"Paracetamol 500mg\nTake 2 times a day
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `apiUrl` | `string` | *(internal)* | Background removal API endpoint. |
-| `timeout` | `number` | `10000` | HTTP request timeout (ms). |
-| `retries` | `number` | `2` | Retry attempts on failure. |
-| `replaceOriginal` | `boolean` | `false` | Overwrite `req.file` with the processed result. |
-| `fieldName` | `string` | `"file"` | Form-data field name sent to the API. |
+| `apiUrl` | `string` | *(internal)* | Full URL of the remove-bg endpoint |
+| `timeout` | `number` | `10000` | HTTP request timeout (ms) |
+| `retries` | `number` | `2` | Retry attempts on failure |
+| `replaceOriginal` | `boolean` | `false` | Overwrite `req.file` with processed result |
+| `fieldName` | `string` | `"file"` | Form-data field name sent to the API |
 
-### `ocrMiddleware(options)` and `ocrStreamHandler(options)`
+### `ocrMiddleware(options)` / `ocrRestMiddleware(options)`
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `wsUrl` | `string` | `process.env.OCR_WS_URL` | WebSocket base URL of the OCR server. |
-| `timeout` | `number` | `30000` | WebSocket connection timeout (ms). |
-| `retries` | `number` | `1` | *(ocrMiddleware only)* Retry attempts on failure. |
+| `apiUrl` | `string` | `process.env.OCR_API_URL` | HTTP(S) base URL of the OCR server |
+| `wsUrl` | `string` | `process.env.OCR_WS_URL` | Backward compat — auto-converted to `https://` |
+| `timeout` | `number` | `30000` | Request timeout (ms) |
+| `retries` | `number` | `1` | Retry attempts (skipped on 4xx errors) |
+| `fieldName` | `string` | `"file"` | Form-data field name |
+
+### `ocrStreamHandler(options)`
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `apiUrl` | `string` | `process.env.OCR_API_URL` | HTTP(S) base URL of the OCR server |
+| `wsUrl` | `string` | `process.env.OCR_WS_URL` | Backward compat — auto-converted to `https://` |
+| `timeout` | `number` | `30000` | Request timeout (ms) |
+| `fieldName` | `string` | `"file"` | Form-data field name |
 
 ---
 
 ## 5. Request Object Properties
-
-After each middleware runs, the following properties are attached to the `req` object:
 
 ### `removeBgMiddleware`
 
@@ -278,15 +286,17 @@ After each middleware runs, the following properties are attached to the `req` o
 | `req.processedImage.mimetype` | `string` | Success |
 | `req.bgError` | `Error` | All retries failed |
 
-### `ocrMiddleware`
+### `ocrMiddleware` / `ocrRestMiddleware`
 
 | Property | Type | Set When |
 |---|---|---|
 | `req.ocrResult.full_text` | `string` | Success |
 | `req.ocrResult.lines` | `Array<{text, confidence}>` | Success |
 | `req.ocrResult.total_lines` | `number` | Success |
-| `req.ocrChunks` | `Array<{text, confidence}>` | Success (alias for `lines`) |
+| `req.ocrChunks` | `Array<{text, confidence}>` | Success (shallow copy of `lines`) |
 | `req.ocrError` | `Error` | All retries failed |
+
+> All middlewares silently skip and call `next()` if `req.file` is missing or the file is not an image.
 
 ---
 
@@ -297,12 +307,11 @@ After each middleware runs, the following properties are attached to the `req` o
 ```javascript
 const extractText = async (file) => {
     const formData = new FormData();
-    formData.append('image', file);
+    formData.append('image', file);   // PNG, JPG, WEBP — any image format
 
-    const res = await fetch('/ocr', { method: 'POST', body: formData });
-    if (!res.ok) throw new Error('OCR request failed');
-
+    const res  = await fetch('/ocr', { method: 'POST', body: formData });
     const data = await res.json();
+
     console.log('Full text:', data.full_text);
     data.lines.forEach(line => {
         console.log(`"${line.text}" (${(line.confidence * 100).toFixed(1)}%)`);
@@ -310,34 +319,36 @@ const extractText = async (file) => {
 };
 ```
 
-### OCR Live Stream — EventSource / fetch with ReadableStream
+### OCR Live Stream — fetch with ReadableStream
 
 ```javascript
-const streamOcr = async (file, onChunk, onComplete) => {
+const streamOcr = async (file, onChunk, onComplete, onError) => {
     const formData = new FormData();
-    formData.append('image', file);
+    formData.append('image', file);   // PNG, JPG, WEBP — any image format
 
-    const res = await fetch('/ocr/stream', { method: 'POST', body: formData });
-    const reader = res.body.getReader();
+    const res     = await fetch('/ocr/stream', { method: 'POST', body: formData });
+    const reader  = res.body.getReader();
     const decoder = new TextDecoder();
-    let buffer = '';
+    let buffer    = '';
 
     while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n\n');
-        buffer = lines.pop(); // keep incomplete last chunk
+        const frames = buffer.split('\n\n');
+        buffer = frames.pop();   // keep incomplete last frame
 
-        for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-            const event = JSON.parse(line.slice(6));
+        for (const frame of frames) {
+            if (!frame.startsWith('data: ')) continue;
+            const event = JSON.parse(frame.slice(6));
 
             if (event.event === 'ocr_chunk') {
-                onChunk(event.text, event.confidence);
+                onChunk(event.data, event.confidence);   // event.data = extracted text
             } else if (event.event === 'ocr_complete') {
-                onComplete(event.full_text);
+                onComplete(event.data.total_lines);
+            } else if (event.event === 'error') {
+                onError(event.message);
             }
         }
     }
@@ -346,64 +357,76 @@ const streamOcr = async (file, onChunk, onComplete) => {
 // Usage
 streamOcr(
     imageFile,
-    (text, confidence) => console.log('Line found:', text),
-    (fullText) => console.log('Done! Full text:\n', fullText)
+    (text, conf) => console.log(`Line: "${text}" (${(conf * 100).toFixed(1)}%)`),
+    (total)      => console.log(`Done — ${total} lines extracted`),
+    (err)        => console.error('OCR error:', err)
 );
 ```
 
-### React Hook Example (Live OCR)
+### React Hook — Live OCR
 
 ```jsx
 import { useState } from 'react';
 
-function useOcrStream() {
-    const [lines, setLines] = useState([]);
-    const [fullText, setFullText] = useState('');
-    const [loading, setLoading] = useState(false);
+function useOcrStream(endpoint = '/ocr/stream') {
+    const [lines,    setLines]    = useState([]);
+    const [done,     setDone]     = useState(false);
+    const [loading,  setLoading]  = useState(false);
+    const [error,    setError]    = useState(null);
 
     const runOcr = async (file) => {
         setLines([]);
-        setFullText('');
+        setDone(false);
+        setError(null);
         setLoading(true);
 
         const formData = new FormData();
         formData.append('image', file);
 
-        const res = await fetch('/ocr/stream', { method: 'POST', body: formData });
-        const reader = res.body.getReader();
+        const res     = await fetch(endpoint, { method: 'POST', body: formData });
+        const reader  = res.body.getReader();
         const decoder = new TextDecoder();
-        let buffer = '';
+        let buffer    = '';
 
         while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
+            const { done: streamDone, value } = await reader.read();
+            if (streamDone) break;
 
             buffer += decoder.decode(value, { stream: true });
-            const chunks = buffer.split('\n\n');
-            buffer = chunks.pop();
+            const frames = buffer.split('\n\n');
+            buffer = frames.pop();
 
-            for (const chunk of chunks) {
-                if (!chunk.startsWith('data: ')) continue;
-                const event = JSON.parse(chunk.slice(6));
+            for (const frame of frames) {
+                if (!frame.startsWith('data: ')) continue;
+                const event = JSON.parse(frame.slice(6));
+
                 if (event.event === 'ocr_chunk') {
-                    setLines((prev) => [...prev, event.text]);
+                    setLines((prev) => [...prev, { text: event.data, confidence: event.confidence }]);
                 } else if (event.event === 'ocr_complete') {
-                    setFullText(event.full_text);
+                    setDone(true);
+                    setLoading(false);
+                } else if (event.event === 'error') {
+                    setError(event.message);
                     setLoading(false);
                 }
             }
         }
     };
 
-    return { lines, fullText, loading, runOcr };
+    return { lines, done, loading, error, runOcr };
 }
+
+// Usage in component:
+// const { lines, loading, runOcr } = useOcrStream();
+// <input type="file" onChange={e => runOcr(e.target.files[0])} />
+// {lines.map((l, i) => <p key={i}>{l.text}</p>)}
 ```
 
 ---
 
 ## 7. Error Handling
 
-All middlewares follow a **fail-safe** design: they never throw or crash your server. Errors are captured and attached to `req` so you decide how to respond.
+All middlewares follow a **fail-safe** design — they never throw or crash your server.
 
 ### Background Removal
 
@@ -411,46 +434,36 @@ All middlewares follow a **fail-safe** design: they never throw or crash your se
 removeBgMiddleware({ retries: 2 }),
 (req, res) => {
     if (req.bgError) {
-        // API was unreachable or returned an error after all retries
-        console.error(req.bgError.message);
         return res.status(502).json({ error: 'Image processing service unavailable' });
     }
-    // Proceed normally...
+    // proceed normally
 }
 ```
 
-### OCR Middleware
+### OCR Buffered
 
 ```javascript
 ocrMiddleware({ retries: 1 }),
 (req, res) => {
     if (req.ocrError) {
-        // WebSocket failed or timed out after all retries
-        return res.status(502).json({ error: 'OCR service unavailable' });
+        // Includes server error detail when available, e.g.:
+        // "OCR failed after 1 attempt(s). Last error: Request failed with status code 422 (File too large)"
+        return res.status(502).json({ error: req.ocrError.message });
     }
-    // Proceed normally...
+    // proceed normally
 }
 ```
 
-### OCR Stream Handler
+### OCR Stream
 
-The stream handler automatically sends an SSE error event and closes the connection:
-
-```
-data: {"event":"error","message":"OCR connection timed out"}
-```
-
-The client should always listen for the `error` event:
+The stream handler automatically sends an SSE `error` event and closes the connection. Always listen for it on the client:
 
 ```javascript
 if (event.event === 'error') {
     console.error('OCR error:', event.message);
+    // show error UI, stop spinner, etc.
 }
 ```
-
-### Skipped Files
-
-If `req.file` is missing or the mimetype does not start with `image/`, all middlewares silently skip processing and call `next()` with no changes to `req`.
 
 ---
 
@@ -458,23 +471,46 @@ If `req.file` is missing or the mimetype does not start with `image/`, all middl
 
 | Variable | Used By | Description |
 |---|---|---|
-| `OCR_WS_URL` | `ocrMiddleware`, `ocrStreamHandler` | Fallback WebSocket base URL when `wsUrl` option is not passed. Example: `wss://your-space.hf.space` |
+| `OCR_API_URL` | `ocrMiddleware`, `ocrStreamHandler` | HTTP(S) base URL of the OCR server. **Recommended.** |
+| `OCR_WS_URL` | `ocrMiddleware`, `ocrStreamHandler` | Legacy: WebSocket URL — auto-converted to `https://` |
 
 Set in your `.env`:
 
 ```env
+# Recommended (v1.2.0+)
+OCR_API_URL=https://your-ocr-server.hf.space
+
+# Or use the legacy variable (still works — auto-converted to https://)
 OCR_WS_URL=wss://your-ocr-server.hf.space
 ```
+
+> If both are set, `OCR_API_URL` takes precedence.
 
 ---
 
 ## 9. Changelog
 
+### v1.2.0
+- **Breaking (internal):** OCR transport changed from WebSocket binary to **HTTP multipart/form-data**
+  - Images are now sent as normal PNG/JPG files — no binary or base64 conversion needed
+  - `ocrMiddleware` → uses `POST /api/ocr` (complete JSON result)
+  - `ocrStreamHandler` → uses `POST /api/ocr/stream` (real-time SSE chunks)
+- **Added** `apiUrl` option to both OCR functions (direct HTTP URL)
+- **Added** `ocrRestMiddleware` export (alias of `ocrMiddleware`)
+- **Added** `fieldName` option to `ocrStreamHandler`
+- **Added** `res.flush()` calls for immediate SSE event delivery
+- **Added** smart retry: 4xx errors are not retried (only 5xx)
+- **Added** upstream error detail in `req.ocrError.message`
+- **Changed** `req.ocrChunks` is now a shallow copy (not an alias) of `req.ocrResult.lines`
+- **Removed** `ws` (WebSocket) dependency — no longer needed
+- **Updated** Node.js requirement: `>= 16.0.0` (was `>= 14.0.0`)
+- **Backward compat:** `wsUrl` still accepted — auto-converted to `https://`/`http://`
+
 ### v1.1.0
-- **Added** `ocrMiddleware` — buffered OCR over WebSocket
-- **Added** `ocrStreamHandler` — live OCR via Server-Sent Events
-- **Added** `ws` dependency for WebSocket client
-- **Added** `OCR_WS_URL` environment variable support
+- Added `ocrMiddleware` — buffered OCR over WebSocket
+- Added `ocrStreamHandler` — live OCR via Server-Sent Events
+- Added `ws` dependency for WebSocket client
+- Added `OCR_WS_URL` environment variable support
 
 ### v1.0.1
 - Made Hugging Face endpoint internal
