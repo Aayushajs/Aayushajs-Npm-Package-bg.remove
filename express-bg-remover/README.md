@@ -61,11 +61,11 @@ Uploads the image to a background removal REST API and attaches the result to `r
 ### Basic Example
 
 ```javascript
-const express = require('express');
-const multer  = require('multer');
-const { removeBgMiddleware } = require('@development-team/bg-remover');
+import express from 'express';
+import multer from 'multer';
+import { removeBgMiddleware } from '@development-team/bg-remover';
 
-const app    = express();
+const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
 app.post(
@@ -76,8 +76,7 @@ app.post(
         if (req.bgError) {
             return res.status(500).json({ error: req.bgError.message });
         }
-        // req.processedImage.buffer  → Buffer (transparent PNG)
-        // req.processedImage.mimetype → 'image/png'
+
         res.set('Content-Type', req.processedImage.mimetype);
         res.send(req.processedImage.buffer);
     }
@@ -92,9 +91,10 @@ app.post(
     upload.single('image'),
     removeBgMiddleware({ replaceOriginal: true }),
     (req, res) => {
-        if (req.bgError) return res.status(500).json({ error: 'Processing failed' });
-        // req.file.buffer   → processed image
-        // req.file.mimetype → 'image/png'
+        if (req.bgError) {
+            return res.status(500).json({ error: 'Processing failed' });
+        }
+
         res.json({ size: req.file.size });
     }
 );
@@ -133,30 +133,30 @@ Uploads the image to the OCR API and returns the extracted text. This middleware
 Use this when you want a standard request/response flow. The middleware waits for the complete result, attaches it to `req.ocrResult`, and calls `next()`.
 
 ```javascript
-const express = require('express');
-const multer  = require('multer');
-const { ocrMiddleware } = require('@development-team/bg-remover');
+import express from 'express';
+import multer from 'multer';
+import { ocrMiddleware } from '@development-team/bg-remover';
 
-const app    = express();
+const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
 app.post(
     '/ocr',
-    upload.single('image'),       // accepts PNG, JPG, WEBP, etc.
+    upload.single('image'),
     ocrMiddleware({
-        stream: false,            // <--- Disable streaming
+        stream: false,
         timeout: 30000,
         retries: 1
     }),
     (req, res) => {
-        // Fallback error handling if middleware connection failed
         if (req.ocrError) {
             return res.status(502).json({ error: req.ocrError.message });
         }
+
         res.json({
-            full_text:   req.ocrResult.full_text,
+            full_text: req.ocrResult.full_text,
             total_lines: req.ocrResult.total_lines,
-            lines:       req.ocrResult.lines
+            lines: req.ocrResult.lines
         });
     }
 );
