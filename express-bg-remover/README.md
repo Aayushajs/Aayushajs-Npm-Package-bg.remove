@@ -112,15 +112,25 @@ app.post(
 
 ---
 
-## 2. OCR — Buffered (Complete Result)
+## 2. OCR Middleware
 
 **`ocrMiddleware(options)`**
 
-Uploads the image as **normal `multipart/form-data`** (PNG/JPG) to `POST /api/ocr`, waits for the complete result, then attaches it to `req.ocrResult` and calls `next()`.
+Uploads the image to the OCR API and returns the extracted text. This middleware supports **both** buffered complete results and live SSE streaming, controlled by the `stream` parameter. It follows a fail-safe design—if the connection to the OCR API fails, it attaches the error to `req.ocrError` and safely calls `next()`, allowing your API to handle the error gracefully without crashing.
 
-Use this when you want a standard request/response flow and don't need real-time streaming.
+### Options
 
-### Basic Example
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `stream` | `boolean` | `true` | If `true`, streams results live via SSE. If `false`, buffers the complete result and attaches to `req`. |
+| `apiUrl` | `string` | *(internal)* | HTTP(S) base URL of the OCR server |
+| `timeout` | `number` | `30000` | Request timeout in ms |
+| `retries` | `number` | `1` | Retry attempts on failure (skipped on 4xx errors) |
+| `fieldName` | `string` | `"file"` | Form-data field name sent to the API |
+
+### Example 1: Buffered Mode (`stream: false`)
+
+Use this when you want a standard request/response flow. The middleware waits for the complete result, attaches it to `req.ocrResult`, and calls `next()`.
 
 ```javascript
 const express = require('express');
@@ -134,112 +144,58 @@ app.post(
     '/ocr',
     upload.single('image'),       // accepts PNG, JPG, WEBP, etc.
     ocrMiddleware({
-        apiUrl:  process.env.OCR_API_URL,  // e.g. "https://your-server.hf.space"
+        stream: false,            // <--- Disable streaming
         timeout: 30000,
         retries: 1
     }),
     (req, res) => {
+        // Fallback error handling if middleware connection failed
         if (req.ocrError) {
-            return res.status(500).json({ error: req.ocrError.message });
+            return res.status(502).json({ error: req.ocrError.message });
         }
         res.json({
-            full_text:   req.ocrResult.full_text,    // complete extracted text
+            full_text:   req.ocrResult.full_text,
             total_lines: req.ocrResult.total_lines,
-            lines:       req.ocrResult.lines          // [{text, confidence}, ...]
+            lines:       req.ocrResult.lines
         });
     }
 );
 ```
 
-### `req.ocrResult` Shape
+### Example 2: Live SSE Stream Mode (`stream: true` - default)
 
-```json
-{
-  "full_text": "Paracetamol 500mg\nTake 2 times a day.",
-  "total_lines": 2,
-  "lines": [
-    { "text": "Paracetamol 500mg",   "confidence": 0.985 },
-    { "text": "Take 2 times a day.", "confidence": 0.912 }
-  ]
-}
-```
-
-### Options
-
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `apiUrl` | `string` | `OCR_API_URL` env var | HTTP(S) base URL of the OCR server (e.g. `https://your-space.hf.space`) |
-| `wsUrl` | `string` | `OCR_WS_URL` env var | **Backward compat** — auto-converted to `https://` |
-| `timeout` | `number` | `30000` | Request timeout in ms |
-| `retries` | `number` | `1` | Retry attempts on failure (skipped on 4xx errors) |
-| `fieldName` | `string` | `"file"` | Form-data field name sent to the API |
-
-> **Note:** `ocrRestMiddleware` is an alias of `ocrMiddleware` — both are identical.
-
----
-
-## 3. OCR — Live SSE Stream
-
-**`ocrStreamHandler(options)`**
-
-Uploads the image as **normal `multipart/form-data`** (PNG/JPG) to `POST /api/ocr/stream` and pipes the OCR results back to the client as **Server-Sent Events** in real-time — line by line, as they are extracted.
-
-> This is a **route handler**, not a middleware — it sends the full HTTP response itself. Do **not** add another handler after it.
-
-### Basic Example
+Use this to pipe the OCR results back to the client as **Server-Sent Events** in real-time. If the initial connection fails, it calls `next()` with `req.ocrError` so you can send a standard JSON error response. If successful, it automatically handles the HTTP response and streams the data.
 
 ```javascript
-const express = require('express');
-const multer  = require('multer');
-const { ocrStreamHandler } = require('@development-team/bg-remover');
-
-const app    = express();
-const upload = multer({ storage: multer.memoryStorage() });
-
-// This single line is the complete route — no extra handler needed.
 app.post(
     '/ocr/stream',
-    upload.single('image'),       // accepts PNG, JPG, WEBP, etc.
-    ocrStreamHandler({
-        apiUrl:  process.env.OCR_API_URL,
-        timeout: 30000
-    })
+    upload.single('image'),
+    ocrMiddleware({ stream: true }), // stream is true by default
+    (req, res) => {
+        // We only reach this handler if the initial stream connection FAILED.
+        // If the stream connects successfully, the middleware streams the data and ends the response automatically.
+        if (req.ocrError) {
+            return res.status(502).json({ error: req.ocrError.message });
+        }
+    }
 );
 ```
 
-### SSE Event Stream Format
+### SSE Event Stream Format (Live Mode)
 
 The client receives a `text/event-stream` response with these events:
 
 ```
 data: {"event":"status","data":{"message":"📷 Image received","stage":"received"}}
 
-data: {"event":"status","data":{"message":"🔧 Processing image…","stage":"preprocessing"}}
-
 data: {"event":"status","data":{"message":"📝 Reading text…","stage":"ocr_started"}}
 
 data: {"event":"ocr_chunk","data":"Paracetamol 500mg","index":1,"confidence":0.985,"bbox":[[...]]}
 
-data: {"event":"ocr_chunk","data":"Take 2 times a day.","index":2,"confidence":0.912,"bbox":[[...]]}
-
 data: {"event":"ocr_complete","data":{"message":"✅ Done","total_lines":2}}
 ```
 
-| Event | Key Fields | Description |
-|---|---|---|
-| `status` | `data.message`, `data.stage` | Processing stage update |
-| `ocr_chunk` | `data` (text), `index`, `confidence`, `bbox` | One detected line, streamed live |
-| `ocr_complete` | `data.total_lines` | All lines sent — connection closes |
-| `error` | `message` | Error from OCR server or timeout |
-
-### Options
-
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `apiUrl` | `string` | `OCR_API_URL` env var | HTTP(S) base URL of the OCR server |
-| `wsUrl` | `string` | `OCR_WS_URL` env var | **Backward compat** — auto-converted to `https://` |
-| `timeout` | `number` | `30000` | Request timeout in ms |
-| `fieldName` | `string` | `"file"` | Form-data field name sent to the API |
+> **Backward Compatibility:** `ocrStreamHandler` and `ocrRestMiddleware` are still exported and map to `ocrMiddleware` internally.
 
 ---
 
@@ -259,7 +215,7 @@ data: {"event":"ocr_complete","data":{"message":"✅ Done","total_lines":2}}
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `apiUrl` | `string` | `process.env.OCR_API_URL` | HTTP(S) base URL of the OCR server |
+| `apiUrl` | `string` | *(internal)* | HTTP(S) base URL of the OCR server |
 | `wsUrl` | `string` | `process.env.OCR_WS_URL` | Backward compat — auto-converted to `https://` |
 | `timeout` | `number` | `30000` | Request timeout (ms) |
 | `retries` | `number` | `1` | Retry attempts (skipped on 4xx errors) |
@@ -269,7 +225,7 @@ data: {"event":"ocr_complete","data":{"message":"✅ Done","total_lines":2}}
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `apiUrl` | `string` | `process.env.OCR_API_URL` | HTTP(S) base URL of the OCR server |
+| `apiUrl` | `string` | *(internal)* | HTTP(S) base URL of the OCR server |
 | `wsUrl` | `string` | `process.env.OCR_WS_URL` | Backward compat — auto-converted to `https://` |
 | `timeout` | `number` | `30000` | Request timeout (ms) |
 | `fieldName` | `string` | `"file"` | Form-data field name |

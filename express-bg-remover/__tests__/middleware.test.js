@@ -137,7 +137,7 @@ describe('ocrMiddleware', () => {
         app.post(
             '/ocr',
             upload.single('image'),
-            ocrMiddleware({ apiUrl: OCR_BASE, retries: 1 }),
+            ocrMiddleware({ apiUrl: OCR_BASE, retries: 1, stream: false }),
             (req, res) => {
                 if (req.ocrError) return res.status(500).json({ error: req.ocrError.message });
                 res.status(200).json(req.ocrResult);
@@ -151,19 +151,19 @@ describe('ocrMiddleware', () => {
         expect(typeof ocrMiddleware()).toBe('function');
     });
 
-    test('ocrRestMiddleware is an alias of ocrMiddleware', () => {
-        expect(ocrRestMiddleware).toBe(ocrMiddleware);
+    test('ocrRestMiddleware is a valid function alias', () => {
+        expect(typeof ocrRestMiddleware).toBe('function');
     });
 
     test('should skip and call next if no file provided', async () => {
-        const middleware = ocrMiddleware({ apiUrl: OCR_BASE });
+        const middleware = ocrMiddleware({ apiUrl: OCR_BASE, stream: false });
         const next = jest.fn();
         await middleware({}, {}, next);
         expect(next).toHaveBeenCalledTimes(1);
     });
 
     test('should skip and call next if mimetype is not image/', async () => {
-        const middleware = ocrMiddleware({ apiUrl: OCR_BASE });
+        const middleware = ocrMiddleware({ apiUrl: OCR_BASE, stream: false });
         const next = jest.fn();
         await middleware({ file: { buffer: Buffer.from('x'), mimetype: 'text/plain' } }, {}, next);
         expect(next).toHaveBeenCalledTimes(1);
@@ -171,7 +171,7 @@ describe('ocrMiddleware', () => {
 
     test('should convert wsUrl (ws://) to http:// automatically', async () => {
         nock(OCR_BASE).post('/api/ocr').reply(200, fakeOcrBody);
-        const middleware = ocrMiddleware({ wsUrl: 'ws://ocr.test', retries: 0 });
+        const middleware = ocrMiddleware({ wsUrl: 'ws://ocr.test', retries: 0, stream: false });
         const req = { file: { buffer: Buffer.from('img'), mimetype: 'image/jpeg', originalname: 'a.jpg' } };
         const next = jest.fn();
         await middleware(req, {}, next);
@@ -181,7 +181,7 @@ describe('ocrMiddleware', () => {
 
     test('should convert wsUrl (wss://) to https:// automatically', async () => {
         nock('https://ocr.test').post('/api/ocr').reply(200, fakeOcrBody);
-        const middleware = ocrMiddleware({ wsUrl: 'wss://ocr.test', retries: 0 });
+        const middleware = ocrMiddleware({ wsUrl: 'wss://ocr.test', retries: 0, stream: false });
         const req = { file: { buffer: Buffer.from('img'), mimetype: 'image/jpeg', originalname: 'a.jpg' } };
         const next = jest.fn();
         await middleware(req, {}, next);
